@@ -12,17 +12,33 @@ import pandas as pd
 METRIC_COLUMNS = [
     "deletion_auc",
     "insertion_auc",
+    "aopc",
     "confidence_drop",
     "confidence_increase",
     "road_combined",
+    "pointing_game",
+    "bbox_iou_top20pct",
+    "bbox_energy_ratio",
+    "fp_error_top20pct",
+    "fn_error_top20pct",
     "runtime_sec",
 ]
 
-LOWER_IS_BETTER = {"deletion_auc", "runtime_sec"}
+LOWER_IS_BETTER = {
+    "deletion_auc",
+    "fp_error_top20pct",
+    "fn_error_top20pct",
+    "runtime_sec",
+}
 HIGHER_IS_BETTER = {
     "insertion_auc",
-    "road_combined",
+    "aopc",
+    "confidence_drop",
     "confidence_increase",
+    "road_combined",
+    "pointing_game",
+    "bbox_iou_top20pct",
+    "bbox_energy_ratio",
 }
 
 
@@ -144,24 +160,36 @@ def print_failure_summary(df: pd.DataFrame):
     print(failed[example_cols].head(10).to_string(index=False))
 
 
+def _trim_extremes(values: pd.Series) -> pd.Series:
+    """Drop one max and one min from *values* (requires > 2 non-NaN entries)."""
+    values = values.dropna()
+    if len(values) <= 2:
+        return values
+    values = values.sort_values().iloc[1:-1]
+    return values
+
+
 def build_summary(valid_df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
     available_metrics = [c for c in METRIC_COLUMNS if c in valid_df.columns]
 
     if not available_metrics:
         raise ValueError("No metric columns found in metrics.csv.")
 
-    agg_spec = {}
-    for metric in available_metrics:
-        agg_spec[f"{metric}_mean"] = (metric, "mean")
-        agg_spec[f"{metric}_std"] = (metric, "std")
-        agg_spec[f"{metric}_median"] = (metric, "median")
-        agg_spec[f"{metric}_min"] = (metric, "min")
-        agg_spec[f"{metric}_max"] = (metric, "max")
-        agg_spec[f"{metric}_count"] = (metric, "count")
+    def _group_agg(group: pd.DataFrame) -> pd.Series:
+        row: dict = {}
+        for metric in available_metrics:
+            trimmed = _trim_extremes(group[metric])
+            row[f"{metric}_mean"] = trimmed.mean()
+            row[f"{metric}_std"] = trimmed.std()
+            row[f"{metric}_median"] = trimmed.median()
+            row[f"{metric}_min"] = trimmed.min()
+            row[f"{metric}_max"] = trimmed.max()
+            row[f"{metric}_count"] = len(trimmed)
+        return pd.Series(row)
 
     summary = (
         valid_df.groupby(group_cols, dropna=False)
-        .agg(**agg_spec)
+        .apply(_group_agg)
         .reset_index()
     )
 
@@ -246,7 +274,7 @@ def print_overall_metric_stats(valid_df: pd.DataFrame):
         rows.append(
             {
                 "metric": metric,
-                "count": int(values.count()),
+                "count": len(values),
                 "mean": values.mean(),
                 "std": values.std(),
                 "median": values.median(),

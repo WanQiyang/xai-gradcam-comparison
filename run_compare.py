@@ -36,6 +36,8 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 from metrics import (
+    aopc_from_deletion_curve,
+    compute_bbox_localization_metrics,
     compute_gradcam_builtin_metrics,
     deletion_insertion_auc,
     maybe_resize_cam,
@@ -110,6 +112,7 @@ def load_cub_metadata(data_root: Path):
     labels_path = data_root / "image_class_labels.txt"
     classes_path = data_root / "classes.txt"
     split_path = data_root / "train_test_split.txt"
+    bbox_path = data_root / "bounding_boxes.txt"
 
     id_to_path = {}
     with open(images_path, encoding="utf-8") as f:
@@ -135,6 +138,18 @@ def load_cub_metadata(data_root: Path):
                 class_id_to_raw[cid] = parts[1]
                 class_id_to_name[cid] = format_class_name(parts[1])
 
+    id_to_bbox = {}
+    if bbox_path.exists():
+        with open(bbox_path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    image_id = int(parts[0])
+                    x, y, w, h = [float(v) for v in parts[1:5]]
+                    id_to_bbox[image_id] = [x, y, w, h]
+    else:
+        warnings.warn(f"bounding_boxes.txt not found: {bbox_path}. BBox metrics will be NaN.")
+
     test_ids = None
     if split_path.exists():
         test_ids = set()
@@ -144,11 +159,11 @@ def load_cub_metadata(data_root: Path):
                 if len(parts) >= 2 and int(parts[1]) == 0:
                     test_ids.add(int(parts[0]))
 
-    return id_to_path, id_to_class, class_id_to_name, class_id_to_raw, test_ids
+    return id_to_path, id_to_class, class_id_to_name, class_id_to_raw, test_ids, id_to_bbox
 
 
 def sample_cub_images(data_root: Path, num_images: int, seed: int):
-    id_to_path, id_to_class, class_id_to_name, _, test_ids = load_cub_metadata(data_root)
+    id_to_path, id_to_class, class_id_to_name, _, test_ids, id_to_bbox = load_cub_metadata(data_root)
 
     if test_ids is not None:
         candidate_ids = sorted(test_ids)
@@ -170,6 +185,7 @@ def sample_cub_images(data_root: Path, num_images: int, seed: int):
                 "image_path": data_root / "images" / rel_path,
                 "gt_class_id": gt_class_id,
                 "gt_class_name": gt_class_name,
+                "bbox_xywh": id_to_bbox.get(image_id),
             }
         )
     return samples, class_id_to_name
@@ -397,6 +413,74 @@ def preprocess_clip_image_with_rgb(pil_image: Image.Image, preprocess, device: t
     return input_tensor.unsqueeze(0).to(device), rgb_img
 
 
+def _size_to_hw(size):
+    if isinstance(size, int):
+        return int(size), int(size)
+    if len(size) == 1:
+        return int(size[0]), int(size[0])
+    return int(size[0]), int(size[1])
+
+
+def transform_bbox_xywh_for_preprocess(bbox_xywh, orig_size_wh, preprocess):
+    """
+    Best-effort bbox transform for common OpenCLIP eval preprocess:
+    Resize -> CenterCrop -> ToTensor -> Normalize.
+
+    Returns:
+        transformed_bbox_xywh, transformed_size_wh
+    """
+    if bbox_xywh is None or not hasattr(preprocess, "transforms"):
+        return bbox_xywh, orig_size_wh
+
+    img_w, img_h = float(orig_size_wh[0]), float(orig_size_wh[1])
+    x, y, bw, bh = [float(v) for v in bbox_xywh]
+    x1, y1, x2, y2 = x, y, x + bw, y + bh
+
+    for transform in preprocess.transforms:
+        name = transform.__class__.__name__
+
+        if name == "Resize":
+            size = transform.size
+
+            # Resize(int): shorter side becomes size, aspect ratio is kept.
+            if isinstance(size, int) or (hasattr(size, "__len__") and len(size) == 1):
+                short = float(size if isinstance(size, int) else size[0])
+                if img_w <= img_h:
+                    new_w = short
+                    new_h = img_h * short / img_w
+                else:
+                    new_h = short
+                    new_w = img_w * short / img_h
+            else:
+                # Resize((h, w)): exact size.
+                new_h, new_w = _size_to_hw(size)
+
+            sx = float(new_w) / img_w
+            sy = float(new_h) / img_h
+            x1, x2 = x1 * sx, x2 * sx
+            y1, y2 = y1 * sy, y2 * sy
+            img_w, img_h = float(new_w), float(new_h)
+
+        elif name == "CenterCrop":
+            crop_h, crop_w = _size_to_hw(transform.size)
+            left = (img_w - crop_w) / 2.0
+            top = (img_h - crop_h) / 2.0
+
+            x1, x2 = x1 - left, x2 - left
+            y1, y2 = y1 - top, y2 - top
+
+            x1 = max(0.0, min(float(crop_w), x1))
+            x2 = max(0.0, min(float(crop_w), x2))
+            y1 = max(0.0, min(float(crop_h), y1))
+            y2 = max(0.0, min(float(crop_h), y2))
+
+            img_w, img_h = float(crop_w), float(crop_h)
+
+    transformed_bbox = [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
+    transformed_size = [img_w, img_h]
+    return transformed_bbox, transformed_size
+
+
 def resolve_target(sample, pred_class_id, target_mode: str):
     gt_available = sample["gt_class_id"] is not None
     effective_mode = target_mode
@@ -440,6 +524,8 @@ def run_method(
     overlay_path,
     curve_path,
     steps,
+    bbox_xywh=None,
+    bbox_orig_size_wh=None,
 ):
     cam_kwargs = {"model": model, "target_layers": target_layers}
     if reshape_transform is not None:
@@ -482,10 +568,19 @@ def run_method(
         model, input_tensor, cam_np[np.newaxis, ...], target_class_id
     )
 
+    bbox_metrics = compute_bbox_localization_metrics(
+        cam_np,
+        bbox_xywh=bbox_xywh,
+        orig_size_wh=bbox_orig_size_wh,
+        top_ratio=0.2,
+    )
+
     return {
         "deletion_auc": deletion_auc,
         "insertion_auc": insertion_auc,
+        "aopc": aopc_from_deletion_curve(deletion_curve),
         **builtin,
+        **bbox_metrics,
         "overlay_rgb": overlay_uint8.astype(np.float32) / 255.0,
     }
 
@@ -528,6 +623,10 @@ def main():
     for idx, sample in enumerate(tqdm(samples, desc="Images")):
         tag = f"image_{idx:03d}"
         pil_image = Image.open(sample["image_path"]).convert("RGB")
+        orig_size_wh = list(pil_image.size)
+
+        bbox_xywh_for_metrics = sample.get("bbox_xywh")
+        bbox_size_wh_for_metrics = orig_size_wh
 
         if args.model_mode == "cub_classifier":
             pil_resized = pil_image.resize((args.image_size, args.image_size), Image.BILINEAR)
@@ -535,6 +634,11 @@ def main():
             rgb_img = np.float32(pil_resized) / 255.0
         else:
             input_tensor, rgb_img = preprocess_clip_image_with_rgb(pil_image, transform_fn, device)
+            bbox_xywh_for_metrics, bbox_size_wh_for_metrics = transform_bbox_xywh_for_preprocess(
+                sample.get("bbox_xywh"),
+                orig_size_wh,
+                transform_fn,
+            )
 
         _, pred_class_id, pred_confidence = predict_softmax(model, input_tensor)
         pred_class_name = class_id_to_name.get(pred_class_id, "")
@@ -561,11 +665,19 @@ def main():
                 "target_class_id": target_class_id,
                 "target_class_name": target_class_name,
                 "target_mode": effective_target_mode,
+                "bbox_xywh": sample.get("bbox_xywh"),
+                "has_bbox": sample.get("bbox_xywh") is not None,
                 "deletion_auc": float("nan"),
                 "insertion_auc": float("nan"),
+                "aopc": float("nan"),
                 "confidence_drop": float("nan"),
                 "confidence_increase": float("nan"),
                 "road_combined": float("nan"),
+                "pointing_game": float("nan"),
+                "bbox_iou_top20pct": float("nan"),
+                "bbox_energy_ratio": float("nan"),
+                "fp_error_top20pct": float("nan"),
+                "fn_error_top20pct": float("nan"),
                 "runtime_sec": float("nan"),
                 "error": "",
             }
@@ -587,17 +699,11 @@ def main():
                     overlay_path,
                     curve_path,
                     args.steps,
+                    bbox_xywh=bbox_xywh_for_metrics,
+                    bbox_orig_size_wh=bbox_size_wh_for_metrics,
                 )
-                row.update(
-                    {
-                        "deletion_auc": metrics["deletion_auc"],
-                        "insertion_auc": metrics["insertion_auc"],
-                        "confidence_drop": metrics["confidence_drop"],
-                        "confidence_increase": metrics["confidence_increase"],
-                        "road_combined": metrics["road_combined"],
-                    }
-                )
-                overlay_map[method_name] = metrics["overlay_rgb"]
+                overlay_map[method_name] = metrics.pop("overlay_rgb")
+                row.update(metrics)
             except Exception as exc:
                 row["error"] = repr(exc)
 

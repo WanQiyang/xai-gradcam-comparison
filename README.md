@@ -1,6 +1,6 @@
 # XAI Grad-CAM Comparison
 
-A toolkit for comparing Class Activation Mapping (CAM) methods on **CUB-200-2011**. Supports both supervised CUB classifiers and OpenCLIP zero-shot models. Generates CAM overlays, deletion/insertion curves, quantitative metrics, and summary tables suitable for paper figures.
+A toolkit for comparing Class Activation Mapping (CAM) methods on **CUB-200-2011**. Supports both supervised CUB classifiers and OpenCLIP zero-shot models. Generates CAM overlays, deletion/insertion curves, bounding-box localization metrics, and summary tables suitable for paper figures.
 
 ## Installation
 
@@ -23,7 +23,7 @@ pip install -r requirements.txt
 ```text
 .
 ├── run_compare.py          # Run CAM methods, save overlays / curves / metrics.csv
-├── metrics.py              # Deletion, insertion, pytorch-grad-cam metric utilities
+├── metrics.py              # Deletion, insertion, bbox localization, pytorch-grad-cam metric utilities
 ├── summarize_metrics.py    # Print summary statistics from an output directory
 ├── requirements.txt
 └── README.md
@@ -254,9 +254,12 @@ CUB_200_2011/
   classes.txt
   image_class_labels.txt
   train_test_split.txt
+  bounding_boxes.txt
 ```
 
 If `train_test_split.txt` exists, the script preferentially samples test images (`is_training_image = 0`).
+
+If `bounding_boxes.txt` exists, per-image bounding boxes are loaded and used to compute localization metrics (pointing game, IoU, energy ratio, FP/FN error). When missing, these metrics are reported as `NaN`.
 
 The CUB dataset must be downloaded and extracted manually before running experiments.
 
@@ -322,13 +325,24 @@ outputs/curves/image_000_gradcam_curves.png
 
 If `--target gt` is requested but ground-truth labels are missing, the script falls back to `pred` with a warning.
 
+#### Bounding box
+
+- `bbox_xywh` — bounding box in original image coordinates `[x, y, w, h]`
+- `has_bbox` — whether a bounding box was available for this image
+
 #### Metric values
 
 - `deletion_auc`
 - `insertion_auc`
+- `aopc`
 - `confidence_drop`
 - `confidence_increase`
 - `road_combined`
+- `pointing_game`
+- `bbox_iou_top20pct`
+- `bbox_energy_ratio`
+- `fp_error_top20pct`
+- `fn_error_top20pct`
 - `runtime_sec`
 - `error`
 
@@ -347,7 +361,7 @@ The script reads `metrics.csv` from the specified output directory and prints:
 - Basic information and row counts (valid / failed)
 - Failure summary
 - Overall metric statistics
-- Grouped summary table
+- Grouped summary table (trimmed mean: drops one min and one max before aggregating)
 - Ranking by metric mean
 
 #### Group by method
@@ -391,10 +405,17 @@ Sorting direction is chosen automatically for common metrics:
 | Metric | Sorting direction |
 |--------|-------------------|
 | `deletion_auc` | ascending |
+| `fp_error_top20pct` | ascending |
+| `fn_error_top20pct` | ascending |
 | `runtime_sec` | ascending |
 | `insertion_auc` | descending |
-| `road_combined` | descending |
+| `aopc` | descending |
+| `confidence_drop` | descending |
 | `confidence_increase` | descending |
+| `road_combined` | descending |
+| `pointing_game` | descending |
+| `bbox_iou_top20pct` | descending |
+| `bbox_energy_ratio` | descending |
 
 Other metrics should be interpreted with care.
 
@@ -422,18 +443,33 @@ Use this option mainly when debugging the output table.
 
 ### Metric Interpretation
 
+#### Perturbation-based metrics
+
 | Metric | Direction | Notes |
 |--------|-----------|-------|
 | `deletion_auc` | lower is often better | Removing high-attribution pixels should drop target confidence quickly |
 | `insertion_auc` | higher is often better | Restoring high-attribution pixels should recover target confidence quickly |
+| `aopc` | higher is often better | Average confidence drop after progressively deleting high-attribution pixels |
 | `road_combined` | higher is often better | ROAD combined score from pytorch-grad-cam |
-| `confidence_drop` | see pytorch-grad-cam definition | Drop in target confidence after CAM-based masking |
+| `confidence_drop` | higher means more faithful | Drop in target confidence after CAM-based masking |
 | `confidence_increase` | see pytorch-grad-cam definition | Whether target confidence increases after CAM-based masking |
 | `runtime_sec` | lower is faster | Runtime per image-method pair |
 
 The implemented deletion/insertion baseline is zero in normalized tensor space.  
 For ImageNet-style normalization, this is equivalent to a mean-color image.  
 Report this choice if using the numbers in a paper.
+
+#### Bounding-box localization metrics
+
+These metrics require `bounding_boxes.txt` in the CUB dataset directory. For OpenCLIP mode, the bounding box is automatically transformed through the preprocess pipeline (Resize + CenterCrop) before evaluation.
+
+| Metric | Direction | Notes |
+|--------|-----------|-------|
+| `pointing_game` | higher is better | 1 if the max-CAM point falls inside the ground-truth bbox, else 0 |
+| `bbox_iou_top20pct` | higher is better | IoU between the ground-truth bbox mask and the CAM top-20% mask |
+| `bbox_energy_ratio` | higher is better | Fraction of total CAM energy that falls inside the ground-truth bbox |
+| `fp_error_top20pct` | lower is better | Fraction of CAM top-20% pixels that fall outside the bbox |
+| `fn_error_top20pct` | lower is better | Fraction of bbox pixels not covered by the CAM top-20% mask |
 
 ## CLI Reference
 

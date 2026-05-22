@@ -65,6 +65,143 @@ def trapezoid_auc(y, x):
     return float(np.trapz(y, x))
 
 
+def aopc_from_deletion_curve(deletion_curve):
+    """
+    AOPC from deletion curve.
+
+    Larger AOPC means the target confidence drops more after deleting
+    high-attribution pixels.
+    """
+    curve = np.asarray(deletion_curve, dtype=np.float32)
+    if curve.size <= 1:
+        return float("nan")
+    return float(np.mean(curve[0] - curve[1:]))
+
+
+def _empty_bbox_metrics():
+    return {
+        "pointing_game": float("nan"),
+        "bbox_iou_top20pct": float("nan"),
+        "bbox_energy_ratio": float("nan"),
+        "fp_error_top20pct": float("nan"),
+        "fn_error_top20pct": float("nan"),
+    }
+
+
+def compute_bbox_localization_metrics(
+    cam,
+    bbox_xywh,
+    orig_size_wh,
+    top_ratio=0.2,
+):
+    """
+    Compute weak localization metrics using a CUB bounding box.
+
+    Args:
+        cam:
+            CAM heatmap, shape [H, W].
+        bbox_xywh:
+            Bounding box in the coordinate frame of orig_size_wh:
+            [x, y, width, height].
+        orig_size_wh:
+            Original image size as [width, height].
+            If bbox has already been transformed into CAM/input coordinates,
+            pass orig_size_wh as [cam_width, cam_height].
+        top_ratio:
+            Top attribution ratio used to binarize CAM. Default 0.2 means
+            selecting the top 20% highest-CAM pixels.
+
+    Returns:
+        Dict with:
+            pointing_game:
+                1 if max-CAM point falls inside bbox, else 0.
+            bbox_iou_top20pct:
+                IoU between bbox mask and CAM top-20% mask.
+            bbox_energy_ratio:
+                sum(CAM inside bbox) / sum(CAM over the whole image).
+            fp_error_top20pct:
+                fraction of CAM top-20% pixels outside bbox.
+            fn_error_top20pct:
+                fraction of bbox pixels not covered by CAM top-20% mask.
+    """
+    result = _empty_bbox_metrics()
+
+    if bbox_xywh is None or orig_size_wh is None:
+        return result
+
+    cam = normalize_cam(cam)
+    if cam.ndim != 2:
+        return result
+
+    h, w = cam.shape
+    if h <= 0 or w <= 0:
+        return result
+
+    try:
+        orig_w, orig_h = float(orig_size_wh[0]), float(orig_size_wh[1])
+        x, y, bw, bh = [float(v) for v in bbox_xywh]
+    except Exception:
+        return result
+
+    if orig_w <= 0 or orig_h <= 0 or bw <= 0 or bh <= 0:
+        return result
+
+    # Scale bbox from orig_size_wh coordinate frame to CAM coordinate frame.
+    x1 = x / orig_w * w
+    y1 = y / orig_h * h
+    x2 = (x + bw) / orig_w * w
+    y2 = (y + bh) / orig_h * h
+
+    xi1 = int(np.floor(max(0.0, min(float(w), x1))))
+    yi1 = int(np.floor(max(0.0, min(float(h), y1))))
+    xi2 = int(np.ceil(max(0.0, min(float(w), x2))))
+    yi2 = int(np.ceil(max(0.0, min(float(h), y2))))
+
+    if xi2 <= xi1 or yi2 <= yi1:
+        return result
+
+    bbox_mask = np.zeros((h, w), dtype=bool)
+    bbox_mask[yi1:yi2, xi1:xi2] = True
+    bbox_area = int(bbox_mask.sum())
+    if bbox_area <= 0:
+        return result
+
+    # Pointing Game: whether max attribution point lies inside bbox.
+    max_y, max_x = np.unravel_index(int(np.argmax(cam)), cam.shape)
+    result["pointing_game"] = float(bbox_mask[max_y, max_x])
+
+    # Energy ratio: continuous metric, no threshold.
+    cam_sum = float(cam.sum())
+    if cam_sum > 1e-8:
+        result["bbox_energy_ratio"] = float(cam[bbox_mask].sum() / cam_sum)
+
+    # CAM top-k mask.
+    flat_cam = cam.reshape(-1)
+    total_pixels = flat_cam.size
+    top_ratio = float(np.clip(top_ratio, 1e-6, 1.0))
+    k = max(1, int(np.ceil(total_pixels * top_ratio)))
+
+    top_indices = np.argpartition(flat_cam, -k)[-k:]
+    top_mask_flat = np.zeros(total_pixels, dtype=bool)
+    top_mask_flat[top_indices] = True
+    top_mask = top_mask_flat.reshape(h, w)
+
+    top_area = int(top_mask.sum())
+    if top_area <= 0:
+        return result
+
+    intersection = int(np.logical_and(top_mask, bbox_mask).sum())
+    union = int(np.logical_or(top_mask, bbox_mask).sum())
+
+    if union > 0:
+        result["bbox_iou_top20pct"] = float(intersection / union)
+
+    result["fp_error_top20pct"] = float((top_area - intersection) / top_area)
+    result["fn_error_top20pct"] = float((bbox_area - intersection) / bbox_area)
+
+    return result
+
+
 def deletion_insertion_auc(
     model,
     input_tensor,
