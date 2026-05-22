@@ -1,0 +1,12 @@
+torch
+torchvision
+timm
+grad-cam
+open-clip-torch
+huggingface_hub
+numpy
+pillow
+opencv-python
+pandas
+tqdm
+matplotlib

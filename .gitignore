@@ -1,0 +1,81 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# Project outputs
+outputs/
+outputs_*/
+results/
+runs/
+
+# CAM generated files
+overlays/
+grids/
+curves/
+metrics.csv
+summary.csv
+
+# Datasets
+data/
+datasets/
+CUB_200_2011/
+CUB_200_2011.tgz
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Model checkpoints / caches
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# Hugging Face / Torch cache if created locally
+.cache/
+hf_cache/
+torch_cache/
+
+# Large generated media
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.webp
+
+# Keep documentation images if you later add them manually
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!docs/**/*.png
+!README.assets/**/*.jpg
+!README.assets/**/*.jpeg
+!README.assets/**/*.png
