@@ -24,6 +24,7 @@ from tqdm import tqdm
 from pytorch_grad_cam import (
     AblationCAM,
     EigenCAM,
+    FinerCAM,
     GradCAM,
     GradCAMPlusPlus,
     LayerCAM,
@@ -46,7 +47,7 @@ from metrics import (
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-DEFAULT_METHODS = "gradcam,gradcampp,xgradcam,eigencam,layercam"
+DEFAULT_METHODS = "gradcam,ablationcam,eigencam,layercam,finercam"
 
 CAM_METHOD_MAP = {
     "gradcam": GradCAM,
@@ -56,6 +57,7 @@ CAM_METHOD_MAP = {
     "eigencam": EigenCAM,
     "ablationcam": AblationCAM,
     "layercam": LayerCAM,
+    "finercam": FinerCAM,
 }
 
 
@@ -448,10 +450,16 @@ def run_method(
 
     targets = [ClassifierOutputTarget(int(target_class_id))]
 
-    with cam_cls(**cam_kwargs) as cam:
-        if method_name in ("scorecam", "ablationcam"):
-            cam.batch_size = 32
+    supports_context_manager = hasattr(cam_cls, "__enter__")
 
+    if supports_context_manager:
+        with cam_cls(**cam_kwargs) as cam:
+            if method_name in ("scorecam", "ablationcam"):
+                cam.batch_size = 32
+            grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
+            grayscale_cam = grayscale_cam[0]
+    else:
+        cam = cam_cls(**cam_kwargs)
         grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
         grayscale_cam = grayscale_cam[0]
 

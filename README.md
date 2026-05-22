@@ -216,7 +216,7 @@ All methods are selected via `--methods`.
 python run_compare.py \
   --data-root /path/to/CUB_200_2011 \
   --model-mode open_clip \
-  --methods gradcam,gradcampp,scorecam,xgradcam,eigencam,ablationcam,layercam
+  --methods gradcam,ablationcam,eigencam,layercam,finercam
 ```
 
 | CLI name | Class |
@@ -228,6 +228,7 @@ python run_compare.py \
 | `eigencam` | EigenCAM |
 | `ablationcam` | AblationCAM |
 | `layercam` | LayerCAM |
+| `finercam` | FinerCAM |
 
 `scorecam` and `ablationcam` are significantly slower than gradient-based methods. For a quick test, use fewer methods and images:
 
@@ -451,7 +452,7 @@ Report this choice if using the numbers in a paper.
 | `--clip-pretrained` | `openai` | OpenCLIP pretrained weights name |
 | `--clip-prompt-template` | `a photo of a {}, a type of bird.` | Prompt template for CUB class names |
 | `--target` | `gt` | `gt` or `pred` |
-| `--methods` | `gradcam,gradcampp,scorecam,xgradcam,eigencam,ablationcam,layercam` | CAM methods to run |
+| `--methods` | `gradcam,ablationcam,eigencam,layercam,finercam` | CAM methods to run |
 | `--steps` | `20` | Deletion/insertion curve steps |
 | `--seed` | `42` | Random seed |
 | `--image-size` | `224` | Input size; used by CUB classifier and requested for OpenCLIP if supported |
